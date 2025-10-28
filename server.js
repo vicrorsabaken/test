@@ -17,11 +17,10 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Challenge-response функции (как в Lua)
+// Challenge-response функции
 function computeExpected1(r1) {
     return 3 * (r1 * r1) + 7 * r1 - 19;
 }
-
 function computeExpected2(r2) {
     return 5 * (r2 * r2 * r2) - 11 * r2 + 42;
 }
@@ -31,6 +30,11 @@ function generateToken() {
     return crypto.randomBytes(16).toString('hex');
 }
 
+// ---- GET / ----
+app.get('/', (req, res) => {
+    res.send('Work'); // Отвечает "Work", чтобы проверить, что сервер поднят
+});
+
 // ---- /check ----
 app.post('/check', async (req, res) => {
     const { hwid, key, first_val, second_val } = req.body;
@@ -39,7 +43,6 @@ app.post('/check', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'Invalid body' });
     }
 
-    // Проверяем ключ в Supabase
     const { data: whitelistData, error } = await supabase
         .from('whitelist')
         .select('*')
@@ -58,17 +61,13 @@ app.post('/check', async (req, res) => {
         return res.status(403).json({ status: 'deny', message: 'Challenge-response failed' });
     }
 
-    // Обновляем HWID и генерируем одноразовый token для /log
     const token = generateToken();
-    const expires = Date.now() + 60 * 1000; // 60 секунд
-
-    await supabase.from('whitelist').update({
-        hwid
-    }).eq('whitelistkey', key);
-
-    // Сохраняем сессию в memory (для demo, в проде можно хранить в Redis)
+    const expires = Date.now() + 60 * 1000;
     app.locals.sessions = app.locals.sessions || new Map();
     app.locals.sessions.set(token, { hwid, key, expires, used: false });
+
+    // Обновляем HWID в базе
+    await supabase.from('whitelist').update({ hwid }).eq('whitelistkey', key);
 
     return res.json({ status: 'allow', session_token: token });
 });
@@ -97,14 +96,8 @@ app.post('/log', async (req, res) => {
 
     if (!placeName || !ip) return res.status(400).json({ status: 'error', message: 'Invalid body' });
 
-    // Логируем в Supabase
     await supabase.from('logs').insert([
-        {
-            whitelistkey: key,
-            place_name: placeName,
-            ip,
-            note: note || ''
-        }
+        { whitelistkey: key, place_name: placeName, ip, note: note || '' }
     ]);
 
     console.log(`[LOG] Key: ${key} | HWID: ${hwid} | Place: ${placeName} | IP: ${ip}`);
