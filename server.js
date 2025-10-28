@@ -1,23 +1,21 @@
-// server.js
-const express = require('express');
-const bodyParser = require('body-parser');
-const crypto = require('crypto');
+import express from 'express';
+import bodyParser from 'body-parser';
+import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 
 const app = express();
 app.use(bodyParser.json());
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-// Ключи для whitelist (можно хранить в БД)
-const validKeys = new Set(['NIGGERSKEYS', 'ANOTHERKEY']); 
-
-// Сессии: session_token -> { hwid, key, expires }
-const sessions = new Map();
-
-// Хелпер для генерации токена
-function generateToken() {
-    return crypto.randomBytes(16).toString('hex');
+// Supabase
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.error("Supabase URL or KEY not set in environment variables!");
+    process.exit(1);
 }
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // Challenge-response функции (как в Lua)
 function computeExpected1(r1) {
@@ -28,14 +26,28 @@ function computeExpected2(r2) {
     return 5 * (r2 * r2 * r2) - 11 * r2 + 42;
 }
 
+// Генератор одноразового токена
+function generateToken() {
+    return crypto.randomBytes(16).toString('hex');
+}
+
 // ---- /check ----
-app.post('/check', (req, res) => {
+app.post('/check', async (req, res) => {
     const { hwid, key, first_val, second_val } = req.body;
+
     if (!hwid || !key || first_val == null || second_val == null) {
         return res.status(400).json({ status: 'error', message: 'Invalid body' });
     }
 
-    if (!validKeys.has(key)) {
+    // Проверяем ключ в Supabase
+    const { data: whitelistData, error } = await supabase
+        .from('whitelist')
+        .select('*')
+        .eq('whitelistkey', key)
+        .limit(1)
+        .single();
+
+    if (error || !whitelistData) {
         return res.status(403).json({ status: 'deny', message: 'Invalid key' });
     }
 
@@ -46,39 +58,55 @@ app.post('/check', (req, res) => {
         return res.status(403).json({ status: 'deny', message: 'Challenge-response failed' });
     }
 
-    // Генерируем session token
+    // Обновляем HWID и генерируем одноразовый token для /log
     const token = generateToken();
-    const expires = Date.now() + 60 * 1000; // 60 секунд жизни токена
-    sessions.set(token, { hwid, key, expires, used: false });
+    const expires = Date.now() + 60 * 1000; // 60 секунд
+
+    await supabase.from('whitelist').update({
+        hwid
+    }).eq('whitelistkey', key);
+
+    // Сохраняем сессию в memory (для demo, в проде можно хранить в Redis)
+    app.locals.sessions = app.locals.sessions || new Map();
+    app.locals.sessions.set(token, { hwid, key, expires, used: false });
 
     return res.json({ status: 'allow', session_token: token });
 });
 
 // ---- /log ----
-app.post('/log', (req, res) => {
+app.post('/log', async (req, res) => {
     const auth = req.headers['authorization'] || '';
     const token = auth.replace('Bearer ', '').trim();
+
     if (!token) return res.status(401).json({ status: 'error', message: 'No token' });
 
+    const sessions = app.locals.sessions || new Map();
     const session = sessions.get(token);
     if (!session) return res.status(403).json({ status: 'error', message: 'Invalid token' });
 
-    // Проверяем срок жизни
     if (Date.now() > session.expires) {
         sessions.delete(token);
         return res.status(403).json({ status: 'error', message: 'Token expired' });
     }
 
-    // Можно сделать одноразовый токен
     if (session.used) return res.status(403).json({ status: 'error', message: 'Token already used' });
     session.used = true;
 
     const { key, hwid } = session;
-    const { placeName, ip } = req.body;
+    const { placeName, ip, note } = req.body;
 
     if (!placeName || !ip) return res.status(400).json({ status: 'error', message: 'Invalid body' });
 
-    // Логируем (можно в файл или базу)
+    // Логируем в Supabase
+    await supabase.from('logs').insert([
+        {
+            whitelistkey: key,
+            place_name: placeName,
+            ip,
+            note: note || ''
+        }
+    ]);
+
     console.log(`[LOG] Key: ${key} | HWID: ${hwid} | Place: ${placeName} | IP: ${ip}`);
 
     return res.json({ status: 'success' });
